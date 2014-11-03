@@ -103,7 +103,7 @@ class Fastical {
     if (isset($event['DTEND']))
       $dtend = strtotime($event['DTEND']['value']);
     
-    if($dtend < $start)
+    if ($dtend < $start)
       return $events;
     
     $summary = null;

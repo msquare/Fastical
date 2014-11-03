@@ -1,0 +1,3 @@
+[submodule "simshaun_recurr"]
+	path = simshaun_recurr
+	url = https://github.com/simshaun/recurr.git
