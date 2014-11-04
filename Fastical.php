@@ -1,10 +1,19 @@
 <?php
-header('Content-Type:text/plain; charset=utf-8');
 
-$f = new Fastical('OFfjVrPv.ics');
-print_r($f->getEvents(time(), time() + 7 * 24 * 60 * 60));
-
+/**
+ * Fast ical parsing lib.
+ * Parses vevents from ics file in given time range.
+ *
+ * @author msquare
+ * @todo EXRULE
+ */
 class Fastical {
+
+  var $timezone = null;
+
+  var $constraint = null;
+
+  var $transformer = null;
 
   var $ics_file = null;
 
@@ -23,6 +32,11 @@ class Fastical {
     if ($fd == null)
       throw new Exception("Unable to open ics file.");
     
+    require_once 'simshaun_recurr/vendor/autoload.php';
+    $this->timezone = new \DateTimeZone('Europe/Berlin');
+    $this->transformer = new \Recurr\Transformer\ArrayTransformer();
+    $this->constraint = new \Recurr\Transformer\Constraint\BetweenConstraint(\DateTime::createFromFormat('U', $start, $this->timezone), \DateTime::createFromFormat('U', $end, $this->timezone), true);
+    
     $events = array();
     while (($buffer = fgets($fd)) !== false) {
       if (rtrim($buffer) == 'BEGIN:VCALENDAR') {
@@ -33,6 +47,10 @@ class Fastical {
     
     if ($fd != null)
       fclose($fd);
+    
+    usort($events, function ($a, $b) {
+      return $a['start'] > $b['start'];
+    });
     
     return $events;
   }
@@ -61,7 +79,6 @@ class Fastical {
   }
 
   private function parseVEvent($fd, $start, $end) {
-    $events = array();
     $event = array();
     $line = '';
     while (($buffer = fgets($fd)) !== false) {
@@ -83,28 +100,24 @@ class Fastical {
       }
     }
     
-    foreach ($this->validateVEvent($event, $start, $end) as $event)
-      array_push($events, $event);
-    
-    return $events;
+    return $this->validateVEvent($event, $start, $end);
   }
 
   private function validateVEvent($event, $start, $end) {
     $events = array();
+    $override_events = array();
+    
+    $uid = null;
+    if (isset($event['UID']))
+      $uid = $event['UID']['value'];
     
     $dtstart = null;
     if (isset($event['DTSTART']))
       $dtstart = strtotime($event['DTSTART']['value']);
     
-    if ($dtstart > $end)
-      return $events;
-    
     $dtend = null;
     if (isset($event['DTEND']))
       $dtend = strtotime($event['DTEND']['value']);
-    
-    if ($dtend < $start)
-      return $events;
     
     $summary = null;
     if (isset($event['SUMMARY']))
@@ -114,14 +127,83 @@ class Fastical {
     if (isset($event['LOCATION']))
       $location = $event['LOCATION']['value'];
     
-    $events[] = array(
-        'start' => $dtstart,
-        'end' => $dtend,
-        'summary' => $summary,
-        'location' => $location 
-    );
+    if (isset($event['RRULE'])) {
+      if ($dtend == null)
+        $rule = new \Recurr\Rule($event['RRULE']['value'], \DateTime::createFromFormat('U', $dtstart, $this->timezone), null, 'Europe/Berlin');
+      else
+        $rule = new \Recurr\Rule($event['RRULE']['value'], \DateTime::createFromFormat('U', $dtstart, $this->timezone), \DateTime::createFromFormat('U', $dtend, $this->timezone), 'Europe/Berlin');
+      
+      $exdates = array();
+      if (isset($event['EXDATE']))
+        foreach (explode(',', $event['EXDATE']['value']) as $exdate)
+          $exdates[] = strtotime($exdate);
+      
+      foreach ($this->transformer->transform($rule, null, $this->constraint)->getValues() as $recurrance) {
+        $dtstart = $recurrance->getStart()->getTimestamp();
+        $dtend = $recurrance->getEnd()->getTimestamp();
+        
+        if (in_array($dtstart, $exdates))
+          continue;
+        
+        $events[] = array(
+            'start' => $dtstart,
+            'end' => $dtend,
+            'summary' => $summary,
+            'location' => $location,
+            'uid' => $uid 
+        );
+      }
+    } else {
+      if (isset($event['RECURRENCE-ID'])) {
+        $override_start = strtotime($event['RECURRENCE-ID']['value']);
+        $override_end = $override_start + ($dtend - $dtstart);
+        
+        if ($override_start > $end && $dtstart > $end)
+          return array(
+              $events,
+              $override_events 
+          );
+        
+        if ($override_end < $start && $dtend < $start)
+          return array(
+              $events,
+              $override_events 
+          );
+        
+        $override_events[] = array(
+            'override_start' => $override_start,
+            'start' => $dtstart,
+            'end' => $dtend,
+            'summary' => $summary,
+            'location' => $location,
+            'uid' => $uid 
+        );
+      } else {
+        if ($dtstart > $end)
+          return array(
+              $events,
+              $override_events 
+          );
+        if ($dtend < $start)
+          return array(
+              $events,
+              $override_events 
+          );
+        
+        $events[] = array(
+            'start' => $dtstart,
+            'end' => $dtend,
+            'summary' => $summary,
+            'location' => $location,
+            'uid' => $uid 
+        );
+      }
+    }
     
-    return $events;
+    return array(
+        $events,
+        $override_events 
+    );
   }
 
   private function parseVAlarm($fd, $start, $end) {
@@ -130,17 +212,35 @@ class Fastical {
         return;
   }
 
+  private function mergeEvents($events, $override_events, $start, $end) {
+    foreach ($override_events as $override_event) {
+      foreach ($events as $i => &$event) {
+        if ($override_event['uid'] == $event['uid'] && $override_event['override_start'] == $event['start']) {
+          if ($override_event['start'] > $end || $override_event['end'] < $start)
+            unset($events[$i]);
+          else
+            $event = $override_event;
+        }
+      }
+    }
+    return $events;
+  }
+
   private function parseVCalendar($fd, $start, $end) {
     $events = array();
+    $override_events = array();
     while (($buffer = fgets($fd)) !== false) {
       switch (rtrim($buffer)) {
         case 'BEGIN:VEVENT':
-          foreach ($this->parseVEvent($fd, $start, $end) as $event)
+          list($new_events, $new_override_events) = $this->parseVEvent($fd, $start, $end);
+          foreach ($new_events as $event)
             array_push($events, $event);
+          foreach ($new_override_events as $event)
+            array_push($override_events, $event);
           break;
         
         case 'END:VCALENDAR':
-          return $events;
+          return $this->mergeEvents($events, $override_events, $start, $end);
       }
     }
   }
