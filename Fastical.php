@@ -6,6 +6,7 @@
  *
  * @author msquare
  * @todo EXRULE
+ * @todo Timezones
  */
 class Fastical {
 
@@ -35,7 +36,6 @@ class Fastical {
     require_once 'simshaun_recurr/vendor/autoload.php';
     $this->timezone = new \DateTimeZone('Europe/Berlin');
     $this->transformer = new \Recurr\Transformer\ArrayTransformer();
-    $this->constraint = new \Recurr\Transformer\Constraint\BetweenConstraint(\DateTime::createFromFormat('U', $start, $this->timezone), \DateTime::createFromFormat('U', $end, $this->timezone), true);
     
     $events = array();
     while (($buffer = fgets($fd)) !== false) {
@@ -119,6 +119,9 @@ class Fastical {
     if (isset($event['DTEND']))
       $dtend = strtotime($event['DTEND']['value']);
     
+    if (isset($event['DURATION']))
+      $dtend = $dtstart + $this->decodeDuration($event['DURATION']['value']);
+    
     $summary = null;
     if (isset($event['SUMMARY']))
       $summary = $event['SUMMARY']['value'];
@@ -128,15 +131,17 @@ class Fastical {
       $location = $event['LOCATION']['value'];
     
     if (isset($event['RRULE'])) {
+      $exdates = array();
+      if (isset($event['EXDATE']))
+        foreach (explode(',', $event['EXDATE']['value']) as $exdate)
+          $exdates[] = strtotime($exdate);
+      
       if ($dtend == null)
         $rule = new \Recurr\Rule($event['RRULE']['value'], \DateTime::createFromFormat('U', $dtstart, $this->timezone), null, 'Europe/Berlin');
       else
         $rule = new \Recurr\Rule($event['RRULE']['value'], \DateTime::createFromFormat('U', $dtstart, $this->timezone), \DateTime::createFromFormat('U', $dtend, $this->timezone), 'Europe/Berlin');
       
-      $exdates = array();
-      if (isset($event['EXDATE']))
-        foreach (explode(',', $event['EXDATE']['value']) as $exdate)
-          $exdates[] = strtotime($exdate);
+      $this->constraint = new \Recurr\Transformer\Constraint\BetweenConstraint(\DateTime::createFromFormat('U', $start - ($dtend - $dtstart), $this->timezone), \DateTime::createFromFormat('U', $end + ($dtend - $dtstart), $this->timezone), true);
       
       foreach ($this->transformer->transform($rule, null, $this->constraint)->getValues() as $recurrance) {
         $dtstart = $recurrance->getStart()->getTimestamp();
@@ -243,6 +248,24 @@ class Fastical {
           return $this->mergeEvents($events, $override_events, $start, $end);
       }
     }
+  }
+
+  /**
+   *
+   * @todo Weeks, Days
+   */
+  private function decodeDuration($duration) {
+    $d = 0;
+    if (preg_match("/^PT(([0-9]+)H)?(([0-9]+)M)?(([0-9]+)S)?$/", $duration, $matches)) {
+      if (isset($matches[2]))
+        $d += $matches[2] * 60 * 60;
+      if (isset($matches[4]))
+        $d += $matches[4] * 60;
+      if (isset($matches[6]))
+        $d += $matches[6] * 60;
+    }
+    
+    return $d;
   }
 }
 
